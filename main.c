@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * <h2><center>&copy; Copyright (c) 2021 STMicroelectronics.
+  * <h2><center>&copy; Copyright (c) 2019 STMicroelectronics.
   * All rights reserved.</center></h2>
   *
   * This software component is licensed by ST under BSD 3-Clause license,
@@ -19,12 +19,21 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
+#include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "stdio.h"
+#include "stdlib.h"
+#include "bmp280.h"
+#include "bmp280_add.h"
+#include "string.h"
 #include "arm_math.h"
+#include "defs.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -55,7 +64,55 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+//Zmienne przechowujące pomiar
+double temp = 0.0;
+int32_t temp32 = 0;
+float32_t temp_f = 0.0;
+//Buffory do wyświetlania temperatury
+char dane[20];
+char num[12];
+//Instacja filtru PID i uchyb
+arm_pid_instance_f32 pid;
+float32_t error = 0.0;
+//Wypełnienie sygnałów PWM rezystora i wentylatora
+int wypelnienie_heater = 0;
+int wypelnienie_cooler = 0;
+//Sygnał sterujący i wartość zadana
+float32_t u = 0;
+float32_t x_zad = 25.0;
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+	if(htim == &htim2){
+		  BMP280_read(&temp, &temp32);
+		  temp_f = (float32_t)temp;
+		  error = x_zad - temp_f;
+		  u = arm_pid_f32(&pid,error)*10.0;
+		  if(u>=0){
+			  wypelnienie_heater = (int)u;
+		  	  wypelnienie_cooler = 0;
+		  };
+		  if(u<0){
+			  wypelnienie_heater = 0;
+		  };
+		  if(u<-500){
+			  wypelnienie_cooler = -(int)u;
+		  }
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, wypelnienie_heater);
+		  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, wypelnienie_cooler);
+		  sprintf(num,"%d", temp32);
+		  sprintf(dane,"%c%c.%c%c\r", num[0], num[1], num[2], num[3]);
 
+		  HAL_UART_Transmit(&huart3, dane, strlen(dane), 5);
+	}
+}
+
+char rx_buffer[20];
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
+	if(huart == &huart3){
+		char* pend;
+		x_zad = strtof(rx_buffer,&pend);
+		HAL_UART_Receive_IT(&huart3, rx_buffer, 4);
+	}
+}
 /* USER CODE END 0 */
 
 /**
@@ -87,22 +144,42 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART3_UART_Init();
+  MX_SPI4_Init();
+  MX_I2C1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
 
-  float32_t x[2] = {1.0, 1.0};
-  float32_t x_amp;
+  //Inicjalizacja czujnika
+  int8_t rslt = BMP280_init();
+  //Wystartowanie TIM2 z okresem próbkowania Ts = 62.5 ms
+  uint32_t okres = OKRES_PROBKOWANIA;
+  HAL_TIM_Base_Start_IT(&htim2);
+  __HAL_TIM_SET_AUTORELOAD(&htim2, okres);
+  //Wystartowanie kanałów PWM
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, wypelnienie_heater);
+  __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, wypelnienie_cooler);
+  //Wystartowanie UART3
+  HAL_UART_Receive_IT(&huart3, rx_buffer, 4);
 
-  arm_cmplx_mag_f32(x, &x_amp,1);
-
+  //Inicjalizacja regulatora PID
+	pid.Kp = PID_KP;
+	pid.Ki = PID_KI;
+	pid.Kd = PID_KD;
+	arm_pid_init_f32(&pid,1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
   }
   /* USER CODE END 3 */
 }
@@ -158,8 +235,9 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART3;
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_USART3|RCC_PERIPHCLK_I2C1;
   PeriphClkInitStruct.Usart3ClockSelection = RCC_USART3CLKSOURCE_PCLK1;
+  PeriphClkInitStruct.I2c1ClockSelection = RCC_I2C1CLKSOURCE_PCLK1;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
